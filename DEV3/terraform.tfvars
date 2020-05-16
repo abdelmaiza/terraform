@@ -1,0 +1,7 @@
+aws_access_key = ""
+aws_secret_key = ""
+key_name = "terraform"
+private_key_path = "C:\\Users\\AMAIZA\\.ssh\\terraform.pem"
+bucket_name_prefix = "global"
+environment_tag = "dev"
+billing_code_tag = "AMAB0105309"
