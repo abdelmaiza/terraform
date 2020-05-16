@@ -10,11 +10,15 @@ variable "region" {
 }
 
 variable "network_address_space" {
-  default = "10.0.0.0/16"
+  default = "10.1.0.0/16"
 }
 
 variable "subnet1_address_space" {
-  default = "10.0.0.0/24"
+  default = "10.1.0.0/24"
+}
+
+variable "subnet2_address_space" {
+  default = "10.1.1.0/24"
 }
 
 ##########################################################################################################
@@ -65,11 +69,18 @@ resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.vpc.id
 }
 
-resource "aws_subnet" "subnet" {
+resource "aws_subnet" "subnet1" {
   cidr_block = var.subnet1_address_space
   vpc_id = aws_vpc.vpc.id
   map_public_ip_on_launch = true
   availability_zone = data.aws_availability_zones.available.names[0]
+}
+
+resource "aws_subnet" "subnet2" {
+  cidr_block = var.subnet2_address_space
+  vpc_id = aws_vpc.vpc.id
+  map_public_ip_on_launch = true
+  availability_zone = data.aws_availability_zones.available.names[1]
 }
 
 # ROUTING #
@@ -81,19 +92,47 @@ resource "aws_route_table" "rtb" {
   }
 }
 
-resource "aws_route_table_association" "rta-subnet" {
-  subnet_id = aws_subnet.subnet.id
+resource "aws_route_table_association" "rta-subnet1" {
+  subnet_id = aws_subnet.subnet1.id
+  route_table_id = aws_route_table.rtb.id
+}
+
+resource "aws_route_table_association" "rta-subnet2" {
+  subnet_id = aws_subnet.subnet2.id
   route_table_id = aws_route_table.rtb.id
 }
 
 # SECURITY GROUP #
+# elb security group
+resource "aws_security_group" "elb-sg" {
+  name = "elb-sg"
+  vpc_id = aws_vpc.vpc.id
+
+  # allow HTTP access from anywhere
+  ingress {
+    from_port = 80
+    to_port = 80
+    protocol = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # allow all outbound
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = -1
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+}
+
 # Ec2 instance security group
 resource "aws_security_group" "ec2-instance-sg" {
   name        = "ec2_instance_sg"
   description = "Allow ports for ec2 instance"
   vpc_id      = aws_vpc.vpc.id
 
-  # SSH access from anywhere
+  # allow SSH access from anywhere
   ingress {
     from_port   = 22
     to_port     = 22
@@ -101,12 +140,12 @@ resource "aws_security_group" "ec2-instance-sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # HTTP access from anywhere
+  # allow HTTP access from the vpc
   ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.network_address_space]
   }
 
   # outbound internet access
@@ -118,11 +157,28 @@ resource "aws_security_group" "ec2-instance-sg" {
   }
 }
 
-resource "aws_instance" "ec2-instance" {
+# LOAD BALANCER #
+resource "aws_elb" "web" {
+  name = "elb"
+
+  subnets = [aws_subnet.subnet1.id,aws_subnet.subnet2.id]
+  security_groups = [aws_security_group.elb-sg.id]
+  instances = [aws_instance.ec2-instance1.id,aws_instance.ec2-instance2.id]
+
+  listener {
+    instance_port = 80
+    instance_protocol = "http"
+    lb_port = 80
+    lb_protocol = "http"
+  }
+}
+
+# INSTANCES #
+resource "aws_instance" "ec2-instance1" {
   ami                    = data.aws_ami.aws-linux.id
   instance_type          = "t2.micro"
   key_name               = var.key_name
-  subnet_id              = aws_subnet.subnet.id
+  subnet_id              = aws_subnet.subnet1.id
   vpc_security_group_ids = [aws_security_group.ec2-instance-sg.id]
 
   connection {
@@ -136,7 +192,31 @@ resource "aws_instance" "ec2-instance" {
   provisioner "remote-exec" {
     inline = [
       "sudo yum install nginx -y",
-      "sudo service nginx start"
+      "sudo service nginx start",
+      "echo '<html><head><title>Blue Team Server</title></head><body style=\"background-color:#1F778D\"><p style=\"text-align: center;\"><span style=\"color:#FFFFFF;\"><span style=\"font-size:28px;\">Blue Team</span></span></p></body></html>' | sudo tee /usr/share/nginx/html/index.html"
+    ]
+  }
+}
+
+resource "aws_instance" "ec2-instance2" {
+  ami                    = data.aws_ami.aws-linux.id
+  instance_type          = "t2.micro"
+  key_name               = var.key_name
+  subnet_id              = aws_subnet.subnet2.id
+  vpc_security_group_ids = [aws_security_group.ec2-instance-sg.id]
+
+  connection {
+    type        = "ssh"
+    host        = self.public_ip
+    user        = "ec2-user"
+    private_key = file(var.private_key_path)
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo yum install nginx -y",
+      "sudo service nginx start",
+      "echo '<html><head><title>Green Team Server</title></head><body style=\"background-color:#77A032\"><p style=\"text-align: center;\"><span style=\"color:#FFFFFF;\"><span style=\"font-size:28px;\">Green Team</span></span></p></body></html>' | sudo tee /usr/share/nginx/html/index.html"
     ]
   }
 }
@@ -146,6 +226,6 @@ resource "aws_instance" "ec2-instance" {
 ##################################################################################
 
 output "aws_instance_public_dns" {
-  value = aws_instance.ec2-instance.public_dns
+  value = aws_elb.web.dns_name
 }
 
